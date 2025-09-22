@@ -3,19 +3,26 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/manifoldco/promptui"
-	"github.com/olekukonko/tablewriter"
 	"os"
 	"slices"
 	"strings"
+	"sync"
+
+	"github.com/manifoldco/promptui"
+	"github.com/olekukonko/tablewriter"
 )
 
 type Grammar struct {
-	States     []string          `json:"states"`
-	Alphabet   []string          `json:"alphabet"`
-	Transition map[string]string `json:"transition"`
-	Start      string            `json:"start"`
-	Accept     []string          `json:"accept"`
+	States     []string            `json:"states"`
+	Alphabet   []string            `json:"alphabet"`
+	Transition map[string][]string `json:"transition"`
+	Start      string              `json:"start"`
+	Accept     []string            `json:"accept"`
+}
+
+type Branch struct {
+	Path  []string
+	State string
 }
 
 func containsString(slice []string, str string) bool {
@@ -50,7 +57,7 @@ func main() {
 
 	for k, v := range userGrammar.Transition {
 		parts := strings.Split(k, ",")
-		table.Append([]string{parts[0], parts[1], v})
+		table.Append([]string{parts[0], parts[1], strings.Join(v, ", ")})
 	}
 	table.Render()
 
@@ -67,32 +74,72 @@ func main() {
 			break
 		}
 
-		currentState := userGrammar.Start
-		accepted := true
+		branches := []Branch{{Path: []string{userGrammar.Start}, State: userGrammar.Start}}
+		accepted := false
+
+		fmt.Println(promptui.Styler(promptui.FGCyan)("ℹ Initial state: " + userGrammar.Start))
 
 		for _, char := range input {
 			if !containsString(userGrammar.Alphabet, string(char)) {
-				warn := promptui.Styler(promptui.FGYellow)("⚠ Character not in alphabet: " + string(char))
+				warn := promptui.Styler(promptui.FGYellow)(
+					"⚠ Warning: Character '" + string(char) + "' not in alphabet. Skipping.")
 				fmt.Println(warn)
 				accepted = false
 				break
 			}
 
-			transitionKey := fmt.Sprintf("%s,%c", currentState, char)
-			nextState, exists := userGrammar.Transition[transitionKey]
-			if !exists {
-				errMsg := promptui.Styler(promptui.FGRed)("❌ No transition for " + transitionKey)
+			fmt.Println(promptui.Styler(promptui.FGCyan)(
+				fmt.Sprintf("Reading symbol '%c' from %d branches", char, len(branches)),
+			))
+
+			var wg sync.WaitGroup
+			nextBranchesChan := make(chan Branch, 10)
+
+			// process each branch in parallel
+			for _, br := range branches {
+				wg.Add(1)
+				go func(br Branch) {
+					defer wg.Done()
+					transitionKey := fmt.Sprintf("%s,%c", br.State, char)
+					if nextList, exists := userGrammar.Transition[transitionKey]; exists {
+						for _, ns := range nextList {
+							newPath := append(append([]string{}, br.Path...), ns)
+							nextBranchesChan <- Branch{Path: newPath, State: ns}
+						}
+					}
+				}(br)
+			}
+
+			wg.Wait()
+			close(nextBranchesChan)
+
+			var nextBranches []Branch
+			for nb := range nextBranchesChan {
+				nextBranches = append(nextBranches, nb)
+			}
+
+			if len(nextBranches) == 0 {
+				errMsg := promptui.Styler(promptui.FGRed)("❌ No valid transitions")
 				fmt.Println(errMsg)
 				accepted = false
 				break
 			}
-			currentState = nextState
+
+			branches = nextBranches
 		}
 
-		info := promptui.Styler(promptui.FGCyan)("ℹ Final state: " + currentState)
-		fmt.Println(info)
+		// Print all final branches
+		if len(branches) > 0 {
+			for i, br := range branches {
+				pathStr := strings.Join(br.Path, " -> ")
+				fmt.Printf("Branch %d: %s\n", i+1, pathStr)
+				if containsString(userGrammar.Accept, br.State) {
+					accepted = true
+				}
+			}
+		}
 
-		if accepted && containsString(userGrammar.Accept, currentState) {
+		if accepted {
 			success := promptui.Styler(promptui.FGGreen)("✅ String accepted!")
 			fmt.Println(success)
 		} else {
@@ -100,8 +147,8 @@ func main() {
 			fmt.Println(fail)
 		}
 
+		// Print divider
 		divider := promptui.Styler(promptui.FGMagenta)(strings.Repeat("-", 30))
 		fmt.Println(divider)
-
 	}
 }
